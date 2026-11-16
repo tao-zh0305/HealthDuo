@@ -1,0 +1,93 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build iOS app (unsigned, watch app embedded)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project HealthDuo.xcodeproj \
+            -scheme HealthDuo \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tee xcodebuild.log
+
+      - name: Diagnose watch target (optional)
+        if: always()
+        continue-on-error: true
+        run: |
+          xcodebuild \
+            -project HealthDuo.xcodeproj \
+            -scheme HealthDuoWatch \
+            -configuration Release \
+            -destination 'generic/platform=watchOS' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/HealthDuo.app"
+          WATCH="build/Build/Products/Release-watchos/HealthDuoWatch.app"
+          if [ ! -d "$APP" ]; then
+            echo "找不到 iOS 产物：$APP"
+            exit 1
+          fi
+          if [ -d "$WATCH" ] && [ ! -d "$APP/Watch/HealthDuoWatch.app" ]; then
+            echo "iOS 包内没有手表 App，手动补进 Watch/ 目录"
+            mkdir -p "$APP/Watch"
+            cp -R "$WATCH" "$APP/Watch/"
+          fi
+          if [ -d "$APP/Watch/HealthDuoWatch.app" ]; then
+            echo "已包含手表 App"
+          else
+            echo "警告：最终 IPA 内没有手表 App，只有 iPhone 端可用"
+          fi
+          rm -rf Payload HealthDuo-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry HealthDuo-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HealthDuo-unsigned-ipa
+          path: HealthDuo-unsigned.ipa
+          retention-days: 14
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
